@@ -15,6 +15,10 @@ of priority in subsequent passes through loop9), which yeilds often enough to ke
 This implements my LAN "DNS", and broadcasts a name/ip pair to anyone listening on UDP port 53831 on the LAN.
 This helps my setups come right up after a power glitch, for example, as it's quicker than the usual stuff.
 
+Commands to this are sent to UDP port 42042, and are very simple.  For example, sending 'r' tells
+this slave to report whatever information it has, which I set up to be human readable ASCII, because,
+after all, life, the universe, and everything.
+
 THis also implements the over-the-air update mechanism, though I've not used it much.  The target machine is in
 a very cramped crawl space with nice steel beams to dent your head with, wires and pipes to get caught on or
 do damage to...and so on - it's better if you can not have to go there.
