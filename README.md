@@ -5,6 +5,8 @@ This is some code for an ESP8266-based leaf node in my LAN of things.  It's doub
 this software "As is", since it has a lot of stuff specific to my needs here.  However, it's chock full
 of "steal me" examples on how to do things in this kind of setup, so I thought I'd share.
 
+![Hardware](https://github.com/dcfusor/LoT_Crawl_ESP/blob/master/OTLoTOTA/OTLoT.JPG)
+
 I implemented a little scheduler (too simple to call an opsys) for this, so as to spread out the load and
 not do too much on a pass through loop().  The ESP WiFi stack doesn't like that, and here ther's no need
 anyway.  This lets me schedule things at fixed intervals - perhpas many at once, but get them executed in order
