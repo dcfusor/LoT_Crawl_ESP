@@ -1,0 +1,24 @@
+Notes on the ESP basement module
+
+Valves - yellow is ground, power red to open, green or blue to close.
+Relay board needs 5v, 150 ma with both on, ground actuates a relay.
+
+
+perl files may not be up to date, but show logic and protocols well
+Assumes a fixed IP for the ESP8266 of 192.168.1.22 for one, uses name for the other @@@ @@@ !!!
+
+Valve commands
+
+/var/www/cgi/waterctl.cgi -> FIFO ->/usr/bin/ValveAct.pl->ESPoTOTA
+pipepath: "/tmp/valvecmd"
+
+ESP commands:
+  // ! means reset - or will when the ESP function works
+  // r means report sensors (reset flow too)
+  // a means autofill (if possible)
+  // i means open intake
+  // o means open outlet
+  // c means close all
+
+
+DHT indoor changed to GPIO 0 d3)

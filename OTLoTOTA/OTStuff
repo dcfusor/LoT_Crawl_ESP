@@ -1,0 +1,238 @@
+#!/usr/bin/perl
+# stuff data from ESP in trailer basement to the database for OT
+
+use Modern::Perl '2015'; # 5.20 features
+use Time::HiRes qw (usleep alarm sleep); # removed time to use integer systime since epoch
+use Time::HiRes::Sleep::Until; # may need to be added at target machine
+use DateTime;
+use DBI;
+use Socket;
+use IO::Select;
+use POSIX 'setsid'; # for daemonizing
+#use Data::Dumper qw(Dumper);
+#
+
+
+# need to add a sequence number, and a table for hours otherwise same format
+use constant FILTERI	=> 0.1; # input constant for somple LPF
+use constant FILTERA	=> 1.0 - FILTERI; # accumulator constant (must add to 1.0000)
+
+my $debug = 0;
+my $firsttime = 1;
+
+my $slavename = "ESP_B0F1E3_OTB";
+my ($ESPipa, $ESPipn);
+my ($LOG,$Fh,$Fhc);
+my $msgsock; # for talking to slave etc
+my $IOSel;
+my $portno = 42042; # birthday port-y
+my $slavedest; 
+my $msg;
+my $maxtoread = 1024;
+
+my $uptime; # seconds
+my $soctempa; # pi internal temperature, prefilter
+my $soctemp; # pi internal temperature
+my $epoch; # unix time
+
+ my %CurrentMinute; # most recent report data
+ #my $CurrentHour;  # the hour for the data we're cumulating in lasthour
+ #my %LastHour; # accumulated for last hour
+ my $hourc;
+ my $hourz;
+ 
+ my $dsn = "DBI:mysql:host=localhost;database=OTInfra"; # data source name
+ my $su;  # sleep until magic variable
+ my $dbh; # database handle
+ my $sthm; # statement handle for minutes insert
+ my $sthh;  # for hours table
+my $sthmtxt = "INSERT INTO Minutes (Sequence,Epoch,Timestamp,WaterLevel,Valves,WaterInRate,WaterOutRate,
+IndoorTemp,IndoorHumid,OutdoorTemp,OutdoorHumid,BaseTemp,BaseHumid,Barometer,CPUTemp,Uptime) 
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+
+my $sthhtxt = "INSERT INTO Hours (Sequence,Epoch,Timestamp,WaterLevel,Valves,WaterInRate,WaterOutRate,
+IndoorTemp,IndoorHumid,OutdoorTemp,OutdoorHumid,BaseTemp,BaseHumid,Barometer,CPUTemp,Uptime) 
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"; # for inputting to hour table
+
+my $pid;
+#****************************************
+sub loggit
+{ # routine for error reporting to logfile, since we're going to wind up as a daemon
+ my $msg = shift;
+ my $now = scalar localtime();
+ $msg = "oops: " unless $msg;
+ print $LOG "$now: $msg :$!\n";
+}
+#****************************************
+sub setupsock()
+{
+ socket($msgsock,PF_INET,SOCK_DGRAM,getprotobyname("udp")) or loggit ("socket:");
+ $IOSel = IO::Select->new($msgsock) or loggit "IOSel:";   # quickie way to see if ready
+}
+#****************************************
+sub getESP # setup comm with ESP slave
+{
+ while (!$ESPipn) {
+$ESPipn = gethostbyname($slavename);
+ unless ($ESPipn) 
+ { # never seem to hit this, even if target offline, the dns is in the router???
+   # would maybe hit it on router reboot + target not there at the time.
+  loggit "waiting on gethost";
+  say "waiting on gethost" if $debug;
+  sleep 1;
+ }
+}
+ $ESPipa = inet_ntoa($ESPipn); 
+ loggit "perl func returned:$ESPipa";
+ $ESPipa = "192.168.1.22";
+loggit "I will use $ESPipa as the address for $slavename\n";
+ $slavedest= sockaddr_in($portno, inet_aton($ESPipa)); # @@@ test later with ESPipn and no call
+}
+#######################
+sub getReport
+{
+ #in the loop so retry etc
+ setupsock() unless $msgsock; # even this has to wait for the DHCP stuff
+ $msg = 'r';
+ 
+ send($msgsock,"$msg",0,$slavedest) or loggit("send:"); # send request
+ if ($IOSel->can_read(2)) # with timeout
+ {
+  recv($msgsock,$msg,$maxtoread,0);
+  %CurrentMinute = split /\s+/,$msg;
+ # print Dumper \%CurrentMinute if $debug;
+  # say ("\nmessage received:\n$msg") if $debug;
+ } else
+ {
+  loggit "Timeout at $epoch on slave read";	
+  say "oh shit, timed out" if $debug;
+ }
+}
+#######################
+sub ComputeHour
+{
+ say "Doing the hour stuff" if $debug;
+ # db columns
+ my ($WLvl,$Vlvs,$Win,$Wo,$IT,$IH,$OTm,$OH,$BT,$BH,$BP,$CT,$UT);
+ #other
+ my $divisor;
+ my $start = $epoch - 3600; # an hour ago (may want to slightly pad this)
+ my @raw ;
+ my $row;
+  my $sthT = $dbh->prepare("SELECT WaterLevel,Valves,WaterInRate,WaterOutRate,IndoorTemp,IndoorHumid,
+  OutdoorTemp,OutdoorHumid, BaseTemp,BaseHumid,Barometer,CPUTemp,Uptime FROM Minutes WHERE Epoch > $start"); 
+ $sthT->execute; 
+ @raw = @{$sthT->fetchall_arrayref()}; # get the entire dataset for last hour
+ # I maybe could have used fetchall_hashref and not had to depend on array index/ordering below
+ # compute averages or acumulations and stuff into hours table
+ $divisor = 1.0/scalar(@raw);  # 1/ array length for averaging
+ 
+ foreach $row (@raw) { # $row is an array ref
+  $WLvl = $row->[0];  #sloppy but will end up with last value
+  $Vlvs |= $row->[1]; # any on for whole hour?
+  $Win += $row->[2]; #cumulate this
+  $Wo += $row->[3];
+  $IT += $row->[4];
+  $IH += $row->[5];
+  $OTm += $row->[6];
+  $OH += $row->[7];
+  $BT += $row->[8];
+  $BH += $row->[9];
+  $BP += $row->[10];
+  $CT += $row->[11];
+  $UT = $row->[12];  # just get last value sloppy way
+ } # foreach row
+ # now do the "divide" for averaging on some of them
+ $IT *= $divisor;
+ $IH *= $divisor;
+ $OTm *= $divisor;
+ $OH *= $divisor;
+ $BT *= $divisor;
+ $BH *= $divisor;
+ $BP *= $divisor;
+ $CT *= $divisor;
+# say "debug: $WLvl,$Vlvs,$Win,$Wo,$IT,$IH,$OTm,$OH,$BT,$BH,$BP,$CT,$UT";
+ $sthh->execute(undef,$epoch,undef,$WLvl,$Vlvs,$Win,$Wo,$IT,$IH,$OTm,$OH,$BT,$BH,$BP,$CT,$UT);
+ say "Done hour stuff, uptime:$UT" if $debug;
+}
+#######################
+
+#######################
+sub getuptime()
+{ # linux keeps this in a virtual file, almost too easy
+ open(Fh,"< /proc/uptime") or die "Couldn't open uptime file: $!";
+ ($uptime,undef) = split /\s+/,<Fh>,2;
+  close Fh;
+}
+#######################
+sub getsoctemp()
+{ # also a virtual file, just get the data, Lowpass it.
+ open (Fhc, "< /sys/class/thermal/thermal_zone0/temp") or die "Couldn't open soc temperature file:$!";
+ $soctempa = <Fhc>;
+ chomp $soctempa;
+ $soctempa /= 1000.;
+ $soctempa = $soctempa * 1.8 + 32;
+# print "Raw SOC:$soctempa\n\n" if $debug;
+ if ($firsttime) { $soctemp = $soctempa;}
+ else {$soctemp = $soctempa * FILTERI + $soctemp * FILTERA;} # lowpass filter, first order
+ close Fhc;
+}
+#######################
+ sub init
+ {
+  open ($LOG, ">> /tmp/OTStuff.log") or die "couldn't open logfile";
+  $!  = 0; # clear any old errors
+  select $LOG;
+  $| = 1;  #autoflush
+  select STDOUT; 
+  loggit ("started\n");
+#pod
+  $pid = fork(); # we're going to detach from whoever started us
+  exit if $pid; # parent dies
+  POSIX::setsid();  #or say ("Can't start new session");
+  close (STDIN); # never use it anyway
+  close (STDOUT);
+  close (STDERR);
+#cut
+
+  getESP(); # get the ip etc of the slave
+  $su = Time::HiRes::Sleep::Until->new; # create a "wait until" object
+  loggit "sleeping for awhile...";
+  sleep 30; # fuck me systemd
+  loggit "slept";
+  $dbh = DBI->connect($dsn,"DataAcq","Acq") or loggit "Cannot connect to db server:$DBI::errstr\n"; # also, some free delay time
+# prepare statement handles here too
+  $sthm = $dbh->prepare($sthmtxt); # see declarations above for details
+  $sthh = $dbh->prepare($sthhtxt);
+  $hourc = $hourz = (localtime(time))[2];
+ # daemonize
+
+ }
+#######################
+#######################
+##################################################################
+###############################   Main   #############################
+##################################################################
+ init(); 
+# could wait for 30 here.
+do {
+ getReport(); # get the data report
+  $epoch = time(); # now
+#loggit "time:$epoch";
+  getuptime();
+  getsoctemp();
+ $sthm->execute(undef,$epoch,undef,$CurrentMinute{WLEV},$CurrentMinute{VALVES},$CurrentMinute{WFI},$CurrentMinute{WFO},
+$CurrentMinute{ITMP},$CurrentMinute{IRH},$CurrentMinute{OTMP},$CurrentMinute{ORH},$CurrentMinute{BTMP},$CurrentMinute{BRH},
+$CurrentMinute{BARO},$soctemp,$uptime) or loggit "Sql execute:$DBI::errstr";
+ # compute hour and stuff that too
+ $hourc = (localtime(time))[2];  # when are we?
+ if ($hourc != $hourz)
+ {
+  ComputeHour(); # do hourly calx and stuff table
+  $hourz = $hourc; # get ready for next time  
+  }
+  $firsttime = 0; # because it isn't anymore
+ } while ($su->second(30)); # do loop at bottom of every minute
+
+
+say "made it" if $debug;

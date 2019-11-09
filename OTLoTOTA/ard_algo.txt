@@ -1,0 +1,14 @@
+
+
+At minute top:
+If any valve is open, increment its time variable.
+if any time var past limit, clear that valve's bit and vars - time and auto flag too
+If not, zero that time variable.
+
+If auto is set: (by handle host)
+set valve var |= 1 (no effect if already open)
+
+if full - clear valve, variable, time var
+unless flow, clear them (figure out how to handle flow outside the plot variable)
+
+if autofill command comes in, open inlet valve and set auto variable.
